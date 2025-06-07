@@ -1,4 +1,3 @@
-# main.py
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os, requests
@@ -10,7 +9,7 @@ LOYVERSE_TOKEN = os.getenv("LOYVERSE_TOKEN")
 BASE = "https://api.loyverse.com/v1.0"
 HEAD = {"Authorization": f"Bearer {LOYVERSE_TOKEN}"}
 
-# 关键 alias 规则（可继续扩展）
+# 关键别名（可扩展）
 CRIT = {
     "Pepper Steak": ["pepper steak", "paper space", "peper estic", "peper steak", "bistec pepper", "carne pepper"],
     "Pollo Pepper": ["pollo pepper", "pollo pimiento", "peper pollo"]
@@ -27,10 +26,6 @@ def build_alias(item):
 def health():
     return "OK", 200
 
-@app.get("/version")
-def version():
-    return jsonify({"version": "1.1.1", "status": "online"})
-
 @app.post("/get_menu")
 def get_menu():
     items = []
@@ -38,6 +33,8 @@ def get_menu():
     while url:
         r = requests.get(url, headers=HEAD).json()
         for it in r.get("items", []):
+            if not it.get("sku"):
+                continue
             items.append({
                 "sku": it["sku"],
                 "name": it["name"],
@@ -51,7 +48,7 @@ def get_menu():
 @app.post("/get_customer")
 def get_cust():
     data = request.json or {}
-    phone = (data.get("phone") or request.headers.get("X-Vapi-Caller") or "").strip()
+    phone = data.get("phone") or request.headers.get("X-Vapi-Caller")
     if not phone:
         return jsonify({"error": "Missing phone number"}), 400
     r = requests.get(f"{BASE}/customers?phone={phone}", headers=HEAD).json()
@@ -62,9 +59,8 @@ def get_cust():
 
 @app.post("/create_customer")
 def create_cust():
-    data = request.json or {}
-    name = data.get("name", "").strip()
-    phone = data.get("phone", "").strip()
+    data = request.json
+    name, phone = data.get("name"), data.get("phone")
     if not name or not phone:
         return jsonify({"error": "Missing name or phone"}), 400
     r = requests.post(f"{BASE}/customers", headers=HEAD,
@@ -75,9 +71,9 @@ def create_cust():
 
 @app.post("/place_order")
 def place_order():
-    data = request.json or {}
-    customer_id = data.get("customer_id")
+    data = request.json
     items = data.get("items", [])
+    customer_id = data.get("customer_id")
     if not items:
         return jsonify({"error": "Missing items"}), 400
 
@@ -85,6 +81,7 @@ def place_order():
         "line_items": [{"sku": i["sku"], "quantity": i.get("qty", 1)} for i in items],
         "payments": []
     }
+
     if customer_id and customer_id != "null":
         payload["customer_id"] = customer_id
 
