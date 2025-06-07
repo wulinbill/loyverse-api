@@ -63,6 +63,3 @@ def place_order():
     r = requests.post(f"{BASE}/receipts", headers=HEAD,
                       json={"customer_id": data["customer_id"], "line_items": lines, "payments":[]}).json()
     return jsonify({"total_with_tax": r["total_amount"], "receipt_id": r["receipt_id"]})
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
