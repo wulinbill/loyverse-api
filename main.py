@@ -5,8 +5,8 @@ import os, requests
 app = Flask(__name__)
 CORS(app)
 
-LOYVERSE_TOKEN = os.getenv("LOYVERSE_TOKEN")
-BASE = "https://api.loyverse.com/v1.0"
+LOYVERSE_TOKEN = os.getenv("LOYVERSE_TOKEN")  # 环境变量中获取
+BASE = "https://api.loyverse.com/v1.0"         # API根路径
 HEAD = {"Authorization": f"Bearer {LOYVERSE_TOKEN}"}
 
 # 关键别名配置
@@ -30,19 +30,25 @@ def health():
 def get_menu():
     items = []
     url = f"{BASE}/items"
+
     while url:
         r = requests.get(url, headers=HEAD).json()
         for it in r.get("items", []):
-            if "sku" not in it:
-                continue
+            sku = it.get("sku")
+            name = it.get("name")
+            cat = it.get("category_name")
+            price = it.get("default_price")
+            if not sku or not name or not price:
+                continue  # 忽略非法项
             items.append({
-                "sku": it["sku"],
-                "name": it["name"],
-                "category": it.get("category_name", ""),
-                "price_base": float(it.get("default_price", 0)),
+                "sku": sku,
+                "name": name,
+                "category": cat,
+                "price_base": float(price),
                 "aliases": build_alias(it)
             })
         url = r.get("cursor")
+
     return jsonify(items)
 
 @app.post("/get_customer")
@@ -51,7 +57,8 @@ def get_cust():
     phone = data.get("phone") or request.headers.get("X-Vapi-Caller")
     if not phone:
         return jsonify({"error": "Missing phone number"}), 400
-    r = requests.get(f"{BASE}/customers?phone={phone}", headers=HEAD).json()
+    url = f"{BASE}/customers?phone={phone}"
+    r = requests.get(url, headers=HEAD).json()
     if not r.get("customers"):
         return jsonify({})
     c = r["customers"][0]
@@ -59,9 +66,9 @@ def get_cust():
 
 @app.post("/create_customer")
 def create_cust():
-    data = request.json or {}
-    phone = data.get("phone") or request.headers.get("X-Vapi-Caller")
+    data = request.json
     name = data.get("name")
+    phone = data.get("phone") or request.headers.get("X-Vapi-Caller")
     if not name or not phone:
         return jsonify({"error": "Missing name or phone"}), 400
     r = requests.post(f"{BASE}/customers", headers=HEAD,
@@ -77,6 +84,7 @@ def place_order():
     items = data.get("items", [])
     if not customer_id or not items:
         return jsonify({"error": "Missing customer_id or items"}), 400
+
     lines = [{"sku": i["sku"], "quantity": i.get("qty", 1)} for i in items]
     r = requests.post(f"{BASE}/receipts", headers=HEAD,
                       json={"customer_id": customer_id, "line_items": lines, "payments": []}).json()
