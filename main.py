@@ -60,11 +60,31 @@ def create_customer():
 
 @app.post("/place_order")
 def place_order():
-    data = request.json
-    lines = [{"sku": i["sku"], "quantity": i.get("qty", 1)} for i in data["items"]]
-    r = requests.post(f"{BASE}/receipts", headers=HEAD,
-                      json={"customer_id": data["customer_id"], "line_items": lines, "payments": []}).json()
-    return jsonify({"total_with_tax": r["total_amount"], "receipt_id": r["receipt_id"]})
+    try:
+        data = request.json
+        lines = [{"sku": i["sku"], "quantity": i.get("qty", 1)} for i in data["items"]]
+
+        r = requests.post(
+            f"{BASE}/receipts",
+            headers=HEAD,
+            json={
+                "customer_id": data["customer_id"],
+                "line_items": lines,
+                "payments": []
+            }
+        ).json()
+
+        # 如果没有 total_amount，说明 API 报错了
+        if "total_amount" not in r:
+            return jsonify({"error": "Loyverse API error", "details": r}), 500
+
+        return jsonify({
+            "total_with_tax": r["total_amount"],
+            "receipt_id": r["receipt_id"]
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 if __name__ == "__main__":
     from waitress import serve
