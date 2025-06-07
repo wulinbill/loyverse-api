@@ -66,4 +66,5 @@ def place_order():
     return jsonify({"total_with_tax": r["total_amount"], "receipt_id": r["receipt_id"]})
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
+    app.run(host="0.0.0.0", port=10000)
+))
