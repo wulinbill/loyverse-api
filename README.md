@@ -1,3 +1,2 @@
-# Loyverse API Webhook
-
-部署到 Render 的 Flask 服务，支持 Vapi / Twilio 调用。
+# Loyverse API 自动下单接口
+部署到 Render，支持 CORS，自动识别或创建客户。
