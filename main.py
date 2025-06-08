@@ -110,3 +110,7 @@ def place_order():
 # Run locally for testing
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
+
+print("CLIENT ID:", os.getenv("LOYVERSE_CLIENT_ID"))
+print("CLIENT SECRET:", os.getenv("LOYVERSE_CLIENT_SECRET"))
+print("REFRESH TOKEN:", os.getenv("LOYVERSE_REFRESH_TOKEN"))
