@@ -1,74 +1,64 @@
 
-from flask import Flask, request, jsonify, redirect
-from flask_cors import CORS
 import os
 import requests
+from flask import Flask, request, jsonify, redirect
+from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app)
 
-# 环境变量
+# 加载环境变量
 CLIENT_ID = os.getenv("LOYVERSE_CLIENT_ID")
 CLIENT_SECRET = os.getenv("LOYVERSE_CLIENT_SECRET")
 REDIRECT_URI = "https://loyverse-api.onrender.com/callback"
+TOKEN_URL = "https://api.loyverse.com/oauth/token"
 
-# Token 缓存（演示用途，建议实际部署时保存到数据库或文件中）
-TOKEN_STORE = {}
+TOKENS = {"access_token": None, "refresh_token": None}
 
 @app.route("/")
-def index():
+def home():
     return "✅ Loyverse API Server is Live!"
-
-@app.route("/authorize")
-def authorize():
-    scope = "products.read customers.read receipts.write"
-    url = (
-        f"https://api.loyverse.com/oauth/authorize"
-        f"?response_type=code"
-        f"&client_id={CLIENT_ID}"
-        f"&redirect_uri={REDIRECT_URI}"
-        f"&scope={scope}"
-    )
-    return redirect(url)
 
 @app.route("/callback")
 def callback():
     code = request.args.get("code")
     if not code:
-        return "Missing code", 400
+        return "Error: missing authorization code", 400
 
-    token_url = "https://api.loyverse.com/oauth/token"
     data = {
         "grant_type": "authorization_code",
         "code": code,
         "client_id": CLIENT_ID,
         "client_secret": CLIENT_SECRET,
-        "redirect_uri": REDIRECT_URI,
+        "redirect_uri": REDIRECT_URI
     }
 
-    r = requests.post(token_url, json=data)
-    if r.status_code != 200:
-        return f"Failed to get token: {r.text}", 500
+    response = requests.post(TOKEN_URL, data=data)
+    if response.status_code == 200:
+        token_data = response.json()
+        TOKENS["access_token"] = token_data["access_token"]
+        TOKENS["refresh_token"] = token_data.get("refresh_token")
+        return jsonify({"message": "Token received successfully", "tokens": token_data})
+    else:
+        return f"Failed to get token: {response.text}", response.status_code
 
-    token_data = r.json()
-    TOKEN_STORE["access_token"] = token_data["access_token"]
-    TOKEN_STORE["refresh_token"] = token_data.get("refresh_token")
-    return jsonify({"message": "✅ Token saved!", "token_info": token_data})
+@app.route("/get_customer", methods=["POST"])
+def get_customer():
+    if not TOKENS["access_token"]:
+        return "Token not available", 403
+
+    phone = request.json.get("phone")
+    url = f"https://api.loyverse.com/v1.0/customers?phone={phone}"
+    headers = {"Authorization": f"Bearer {TOKENS['access_token']}"}
+    response = requests.get(url, headers=headers)
+    return jsonify(response.json()), response.status_code
 
 @app.route("/get_menu", methods=["POST"])
 def get_menu():
-    access_token = TOKEN_STORE.get("access_token")
-    if not access_token:
-        return jsonify({"error": "Not authorized yet."}), 403
+    if not TOKENS["access_token"]:
+        return "Token not available", 403
 
     url = "https://api.loyverse.com/v1.0/items"
-    headers = {"Authorization": f"Bearer {access_token}"}
-    r = requests.get(url, headers=headers)
-
-    if r.status_code != 200:
-        return jsonify({"error": r.text}), r.status_code
-
-    return jsonify(r.json())
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    headers = {"Authorization": f"Bearer {TOKENS['access_token']}"}
+    response = requests.get(url, headers=headers)
+    return jsonify(response.json()), response.status_code
