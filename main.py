@@ -6,6 +6,7 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 
 load_dotenv()
+
 app = Flask(__name__)
 CORS(app)
 
@@ -16,6 +17,7 @@ def get_token():
         return TOKEN_CACHE["access_token"]
 
     refresh_url = "https://api.loyverse.com/oauth/token"
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
     data = {
         "grant_type": "refresh_token",
         "refresh_token": os.getenv("REFRESH_TOKEN"),
@@ -23,8 +25,9 @@ def get_token():
         "client_secret": os.getenv("CLIENT_SECRET")
     }
 
-    r = requests.post(refresh_url, data=data)
+    r = requests.post(refresh_url, headers=headers, data=data)
     if r.status_code != 200:
+        print("[ERROR] Token refresh failed:", r.status_code, r.text)
         raise Exception("Failed to refresh token")
 
     token_data = r.json()
@@ -39,42 +42,43 @@ def loyverse_headers():
 
 @app.route("/")
 def index():
-    return "Loyverse API 接口在线"
+    return "Loyverse API is running."
 
 @app.route("/get_menu", methods=["POST"])
 def get_menu():
     r = requests.get("https://api.loyverse.com/v1.0/items", headers=loyverse_headers())
-    return jsonify(r.json())
+    return jsonify(r.json()), r.status_code
 
 @app.route("/get_customer", methods=["POST"])
 def get_customer():
-    phone = request.json.get("phone")
+    data = request.json
+    phone = data.get("phone", "")
     r = requests.get(f"https://api.loyverse.com/v1.0/customers?phone={phone}", headers=loyverse_headers())
-    data = r.json()
-    if data.get("customers"):
-        return jsonify(data["customers"][0])
-    return jsonify({"message": "not found"})
+    customers = r.json().get("customers", [])
+    if customers:
+        return jsonify({"customer_id": customers[0]["id"], "name": customers[0]["name"]})
+    return jsonify({"customer_id": None, "name": None})
 
 @app.route("/create_customer", methods=["POST"])
 def create_customer():
-    body = {
-        "name": request.json.get("name"),
-        "phone_number": request.json.get("phone")
+    data = request.json
+    payload = {
+        "name": data.get("name"),
+        "phone_number": data.get("phone")
     }
-    r = requests.post("https://api.loyverse.com/v1.0/customers", headers=loyverse_headers(), json=body)
-    return jsonify(r.json())
+    r = requests.post("https://api.loyverse.com/v1.0/customers", headers=loyverse_headers(), json=payload)
+    if r.status_code == 201:
+        return jsonify({"customer_id": r.json()["id"]})
+    return jsonify({"error": "create_failed", "details": r.text}), r.status_code
 
 @app.route("/place_order", methods=["POST"])
 def place_order():
-    customer_id = request.json.get("customer_id")
-    items = request.json.get("items", [])
-    if not customer_id or not items:
-        return jsonify({"error": "customer_id and items are required"}), 400
-
+    data = request.json
+    customer_id = data["customer_id"]
+    items = data["items"]
     body = {
         "customer_id": customer_id,
-        "line_items": [{"sku": i["sku"], "quantity": i["qty"]} for i in items]
+        "line_items": [{"item_variation_id": item["sku"], "quantity": item["qty"]} for item in items]
     }
-
     r = requests.post("https://api.loyverse.com/v1.0/receipts", headers=loyverse_headers(), json=body)
-    return jsonify(r.json())
+    return jsonify(r.json()), r.status_code
