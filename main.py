@@ -1,156 +1,157 @@
 import os
-import time
 import logging
-from typing import List, Dict, Any
+from functools import wraps
 
 import requests
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, abort
 from flask_cors import CORS
 from dotenv import load_dotenv
 
-# 加载 .env
 load_dotenv()
 
-# 基础配置
-LOYVERSE_API_BASE = "https://api.loyverse.com/v1.0"
-OAUTH_TOKEN_URL = "https://api.loyverse.com/oauth/token"
-CLIENT_ID = os.getenv("CLIENT_ID")
-CLIENT_SECRET = os.getenv("CLIENT_SECRET")
-REFRESH_TOKEN = os.getenv("REFRESH_TOKEN")
-
-if not all([CLIENT_ID, CLIENT_SECRET, REFRESH_TOKEN]):
-    raise RuntimeError("请在环境变量中设置 CLIENT_ID, CLIENT_SECRET, REFRESH_TOKEN")
-
-# 简单缓存 token 及过期时间
-_token_cache: Dict[str, Any] = {}
-
-# 设置日志
-logging.basicConfig(level=logging.INFO)
+# —— 基本配置 —— #
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-def get_access_token() -> str:
-    """获取并缓存 OAuth2 access_token，自动处理过期刷新"""
-    now = int(time.time())
-    token_info = _token_cache.get("token_info", {})
-
-    if token_info and token_info.get("expiry", 0) > now + 60:
-        return token_info["access_token"]
-
-    # 刷新 token
-    data = {
-        "grant_type": "refresh_token",
-        "refresh_token": REFRESH_TOKEN,
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
-    }
-    headers = {"Content-Type": "application/x-www-form-urlencoded"}
-    resp = requests.post(OAUTH_TOKEN_URL, headers=headers, data=data)
-    if resp.status_code != 200:
-        logger.error("Token 刷新失败 %s %s", resp.status_code, resp.text)
-        raise RuntimeError("无法刷新 Loyverse 访问令牌")
-    result = resp.json()
-    access_token = result["access_token"]
-    expires_in = result.get("expires_in", 3600)
-    # 缓存，并记录过期时间
-    _token_cache["token_info"] = {
-        "access_token": access_token,
-        "expiry": now + expires_in
-    }
-    return access_token
-
-def loyverse_headers() -> Dict[str, str]:
-    return {
-        "Authorization": f"Bearer {get_access_token()}",
-        "Content-Type": "application/json"
-    }
-
-def fetch_all_items() -> List[Dict[str, Any]]:
-    """自动分页获取所有 items"""
-    items: List[Dict[str, Any]] = []
-    url = f"{LOYVERSE_API_BASE}/items"
-    params = {"limit": 250}
-    while True:
-        resp = requests.get(url, headers=loyverse_headers(), params=params)
-        if resp.status_code != 200:
-            raise RuntimeError(f"获取菜单失败: {resp.status_code} {resp.text}")
-        data = resp.json()
-        batch = data.get("items", [])
-        items.extend(batch)
-        cursor = data.get("cursor")
-        if not cursor:
-            break
-        params["cursor"] = cursor
-    return items
-
-# Flask 应用
 app = Flask(__name__)
 CORS(app)
 
-@app.route("/")
+TOKEN_CACHE = {}
+
+# —— 装饰器：统一捕获异常并返回 JSON 错误 —— #
+def json_endpoint(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        try:
+            return f(*args, **kwargs)
+        except requests.RequestException as e:
+            logger.exception("网络请求失败")
+            return jsonify({"error": "external_request_failed", "details": str(e)}), 502
+        except Exception as e:
+            logger.exception("内部错误")
+            return jsonify({"error": "internal_error", "details": str(e)}), 500
+    return decorated
+
+# —— OAuth2 Token 刷新与缓存 —— #
+def get_token():
+    """先从缓存取；否则用 refresh_token 刷新并缓存。"""
+    token = TOKEN_CACHE.get("access_token")
+    if token:
+        return token
+
+    refresh_url = "https://api.loyverse.com/oauth/token"
+    payload = {
+        "grant_type": "refresh_token",
+        "refresh_token": os.getenv("REFRESH_TOKEN"),
+        "client_id": os.getenv("CLIENT_ID"),
+        "client_secret": os.getenv("CLIENT_SECRET")
+    }
+    logger.info("Refreshing access token…")
+    r = requests.post(refresh_url,
+                      headers={"Content-Type": "application/x-www-form-urlencoded"},
+                      data=payload,
+                      timeout=10)
+    if r.status_code != 200:
+        logger.error("Token refresh failed: %s %s", r.status_code, r.text)
+        raise Exception(f"Token refresh failed ({r.status_code})")
+    data = r.json()
+    TOKEN_CACHE["access_token"] = data["access_token"]
+    logger.info("Obtained new access token, expires in %s seconds", data.get("expires_in"))
+    return data["access_token"]
+
+def loyverse_headers():
+    return {
+        "Authorization": f"Bearer {get_token()}",
+        "Content-Type": "application/json"
+    }
+
+# —— 根路由 —— #
+@app.route("/", methods=["GET"])
 def index():
-    return "Loyverse API 服务运行中"
+    return "Loyverse API service is up."
 
+# —— 1. 获取菜单 —— #
 @app.route("/get_menu", methods=["POST"])
+@json_endpoint
 def get_menu():
-    try:
-        items = fetch_all_items()
-        # 只返回关键信息
-        simplified = [
-            {
-                "id": it["id"],
-                "name": it["item_name"],
-                "sku": [v["variant_id"] for v in it.get("variants", [])],
-                "price": [v["stores"][0]["price"] for v in it.get("variants", [])],
-            }
-            for it in items
-        ]
-        return jsonify({"items": simplified})
-    except Exception as e:
-        logger.exception("获取菜单出错")
-        return jsonify({"error": str(e)}), 500
+    """调用 Loyverse /items，返回 items 列表。"""
+    r = requests.get("https://api.loyverse.com/v1.0/items",
+                     headers=loyverse_headers(), timeout=10)
+    r.raise_for_status()
+    data = r.json().get("items", [])
+    # 只抽取我们需要的字段，供 AI 识别
+    slim = [{
+        "sku": item["variants"][0]["variant_id"],
+        "name": item["item_name"],
+        "category": item.get("category_id"),
+        "price": item["variants"][0]["stores"][0]["price"]
+    } for item in data]
+    return jsonify({"items": slim})
 
+# —— 2. 查客户 —— #
 @app.route("/get_customer", methods=["POST"])
+@json_endpoint
 def get_customer():
-    data = request.get_json(force=True)
-    phone = data.get("phone", "")
-    resp = requests.get(f"{LOYVERSE_API_BASE}/customers", headers=loyverse_headers(), params={"phone": phone})
-    if resp.status_code != 200:
-        return jsonify({"error": "lookup_failed", "details": resp.text}), resp.status_code
-    custs = resp.json().get("customers", [])
+    phone = request.json.get("phone", "").strip()
+    if not phone:
+        return jsonify({"customer_id": None, "name": None}), 400
+
+    r = requests.get(f"https://api.loyverse.com/v1.0/customers?phone_number={phone}",
+                     headers=loyverse_headers(), timeout=10)
+    r.raise_for_status()
+    custs = r.json().get("customers", [])
     if not custs:
         return jsonify({"customer_id": None, "name": None})
     c = custs[0]
     return jsonify({"customer_id": c["id"], "name": c["name"]})
 
+# —— 3. 新建客户 —— #
 @app.route("/create_customer", methods=["POST"])
+@json_endpoint
 def create_customer():
-    data = request.get_json(force=True)
-    payload = {
-        "name": data.get("name"),
-        "phone_number": data.get("phone")
-    }
-    resp = requests.post(f"{LOYVERSE_API_BASE}/customers", headers=loyverse_headers(), json=payload)
-    if resp.status_code not in (200, 201):
-        return jsonify({"error": "create_failed", "details": resp.text}), resp.status_code
-    return jsonify({"customer_id": resp.json().get("id")})
-
-@app.route("/place_order", methods=["POST"])
-def place_order():
-    data = request.get_json(force=True)
-    customer_id = data["customer_id"]
-    items = data["items"]
     body = {
-        "customer_id": customer_id,
-        "line_items": [
-            {"item_variation_id": item["sku"], "quantity": item["qty"]}
-            for item in items
-        ]
+        "name": request.json.get("name"),
+        "phone_number": request.json.get("phone")
     }
-    resp = requests.post(f"{LOYVERSE_API_BASE}/receipts", headers=loyverse_headers(), json=body)
-    if resp.status_code not in (200, 201):
-        return jsonify({"error": "order_failed", "details": resp.text}), resp.status_code
-    return jsonify(resp.json()), resp.status_code
+    r = requests.post("https://api.loyverse.com/v1.0/customers",
+                      headers=loyverse_headers(), json=body, timeout=10)
+    if r.status_code not in (200, 201):
+        logger.error("create_customer failed: %s %s", r.status_code, r.text)
+        return jsonify({"error": "create_failed", "details": r.text}), r.status_code
+    c = r.json()
+    return jsonify({"customer_id": c["id"]})
+
+# —— 4. 下单 —— #
+@app.route("/place_order", methods=["POST"])
+@json_endpoint
+def place_order():
+    data = request.json
+    items = data.get("items", [])
+    customer_id = data.get("customer_id")
+    if not items:
+        return jsonify({"error": "no_items"}), 400
+
+    line_items = [{
+        "item_variation_id": it["sku"],
+        "quantity": it["qty"]
+    } for it in items]
+
+    payload = {"line_items": line_items}
+    if customer_id:
+        payload["customer_id"] = customer_id
+
+    r = requests.post("https://api.loyverse.com/v1.0/receipts",
+                      headers=loyverse_headers(), json=payload, timeout=10)
+    r.raise_for_status()
+    receipt = r.json()
+
+    # 计算总价（含税）
+    total = receipt.get("total_with_tax") or receipt.get("total")
+    return jsonify({
+        "receipt_id": receipt.get("id"),
+        "total_with_tax": total
+    })
 
 if __name__ == "__main__":
-    # 本地调试用
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=True)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
