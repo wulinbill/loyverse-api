@@ -23,6 +23,8 @@ app = Flask(__name__)
 CORS(app)
 
 _TOKEN_CACHE = {}
+_MENU_CACHE = {}
+_CUSTOMER_CACHE = {}
 
 # -----------------------------------------------------------------------------
 # OAuth2 Token 获取／缓存
@@ -78,15 +80,33 @@ def webhook():
     try:
         # Handle system initialization
         if role == "system":
-            # Initialize menu and customer lookup
-            menu_response = requests.get(
-                "https://api.loyverse.com/v1.0/items",
-                headers=loyverse_headers(),
-                params={"limit": 250},
-                timeout=5
-            )
-            menu_response.raise_for_status()
-            return jsonify({"status": "initialized"}), 200
+            # Initialize menu
+            try:
+                menu_response = requests.get(
+                    "https://api.loyverse.com/v1.0/items",
+                    headers=loyverse_headers(),
+                    params={"limit": 250},
+                    timeout=5
+                )
+                menu_response.raise_for_status()
+                menu_data = menu_response.json()
+                
+                # Process and cache menu items
+                for item in menu_data.get("items", []):
+                    item_id = item.get("id")
+                    if item_id:
+                        _MENU_CACHE[item_id] = {
+                            "sku": item.get("variants", [{}])[0].get("variant_id"),
+                            "name": item.get("item_name"),
+                            "category": item.get("category_id"),
+                            "price": item.get("variants", [{}])[0].get("stores", [{}])[0].get("price"),
+                            "aliases": item.get("aliases", [])
+                        }
+                
+                return jsonify({"status": "initialized", "menu_items": len(_MENU_CACHE)}), 200
+            except Exception as e:
+                app.logger.error("Failed to initialize menu: %s", e)
+                return jsonify({"error": "menu_initialization_failed", "details": str(e)}), 500
             
         # Handle tool calls
         if role == "tool_calls":
@@ -95,43 +115,106 @@ def webhook():
                 arguments = json.loads(tool_call.get("function", {}).get("arguments", "{}"))
                 
                 if function_name == "create_customer":
-                    # Extract phone from caller_id or use provided phone
-                    phone = arguments.get("phone", "")
-                    if phone == "caller_id":
-                        phone = event.get("caller_id", "")
-                    
-                    resp = requests.post(
-                        "https://api.loyverse.com/v1.0/customers",
-                        headers=loyverse_headers(),
-                        json={"name": arguments.get("name"), "phone_number": phone},
-                        timeout=5
-                    )
-                    resp.raise_for_status()
-                    return jsonify(resp.json()), 200
+                    try:
+                        # Extract phone from caller_id or use provided phone
+                        phone = arguments.get("phone", "")
+                        if phone == "caller_id":
+                            phone = event.get("caller_id", "")
+                        
+                        # Check if customer already exists
+                        existing_customer = requests.get(
+                            "https://api.loyverse.com/v1.0/customers",
+                            headers=loyverse_headers(),
+                            params={"phone_number": phone},
+                            timeout=5
+                        )
+                        existing_customer.raise_for_status()
+                        existing_data = existing_customer.json()
+                        
+                        if existing_data.get("customers"):
+                            customer = existing_data["customers"][0]
+                            _CUSTOMER_CACHE[phone] = {
+                                "id": customer["id"],
+                                "name": customer["name"]
+                            }
+                            return jsonify(_CUSTOMER_CACHE[phone]), 200
+                        
+                        # Create new customer
+                        resp = requests.post(
+                            "https://api.loyverse.com/v1.0/customers",
+                            headers=loyverse_headers(),
+                            json={"name": arguments.get("name"), "phone_number": phone},
+                            timeout=5
+                        )
+                        resp.raise_for_status()
+                        customer_data = resp.json()
+                        _CUSTOMER_CACHE[phone] = {
+                            "id": customer_data["id"],
+                            "name": arguments.get("name")
+                        }
+                        return jsonify(_CUSTOMER_CACHE[phone]), 200
+                    except Exception as e:
+                        app.logger.error("Failed to create/get customer: %s", e)
+                        return jsonify({"error": "customer_operation_failed", "details": str(e)}), 500
                     
                 elif function_name == "get_menu":
-                    resp = requests.get(
-                        "https://api.loyverse.com/v1.0/items",
-                        headers=loyverse_headers(),
-                        params={"limit": 250},
-                        timeout=5
-                    )
-                    resp.raise_for_status()
-                    return jsonify(resp.json()), 200
+                    if not _MENU_CACHE:
+                        # Refresh menu if cache is empty
+                        menu_response = requests.get(
+                            "https://api.loyverse.com/v1.0/items",
+                            headers=loyverse_headers(),
+                            params={"limit": 250},
+                            timeout=5
+                        )
+                        menu_response.raise_for_status()
+                        menu_data = menu_response.json()
+                        
+                        for item in menu_data.get("items", []):
+                            item_id = item.get("id")
+                            if item_id:
+                                _MENU_CACHE[item_id] = {
+                                    "sku": item.get("variants", [{}])[0].get("variant_id"),
+                                    "name": item.get("item_name"),
+                                    "category": item.get("category_id"),
+                                    "price": item.get("variants", [{}])[0].get("stores", [{}])[0].get("price"),
+                                    "aliases": item.get("aliases", [])
+                                }
+                    
+                    return jsonify({"items": list(_MENU_CACHE.values())}), 200
                     
                 elif function_name == "place_order":
-                    resp = requests.post(
-                        "https://api.loyverse.com/v1.0/receipts",
-                        headers=loyverse_headers(),
-                        json={
-                            "store_id": STORE_ID,
-                            "customer_id": arguments.get("customer_id"),
-                            "line_items": arguments.get("items", [])
-                        },
-                        timeout=5
-                    )
-                    resp.raise_for_status()
-                    return jsonify(resp.json()), 200
+                    try:
+                        customer_id = arguments.get("customer_id")
+                        items = arguments.get("items", [])
+                        
+                        if not items:
+                            return jsonify({"error": "no_items_provided"}), 400
+                            
+                        resp = requests.post(
+                            "https://api.loyverse.com/v1.0/receipts",
+                            headers=loyverse_headers(),
+                            json={
+                                "store_id": STORE_ID,
+                                "customer_id": customer_id,
+                                "line_items": items
+                            },
+                            timeout=5
+                        )
+                        resp.raise_for_status()
+                        order_data = resp.json()
+                        
+                        # Calculate preparation time based on main dishes
+                        main_dishes = [item for item in items if item.get("category") not in 
+                                     ["acompanantes", "aparte", "extra", "salsa", "NO", "poco"]]
+                        prep_time = "15" if len(main_dishes) >= 3 else "10"
+                        
+                        return jsonify({
+                            "order": order_data,
+                            "preparation_time": prep_time
+                        }), 200
+                    except Exception as e:
+                        app.logger.error("Failed to place order: %s", e)
+                        return jsonify({"error": "order_placement_failed", "details": str(e)}), 500
         
         # For all other events, just acknowledge receipt
         return jsonify({"status": "received"}), 200
