@@ -26,6 +26,10 @@ _TOKEN_CACHE = {}
 _MENU_CACHE = {}
 _CUSTOMER_CACHE = {}
 
+# 挂起队列（简单内存，实现 demo 功能）
+_PENDING_CUSTOMER_CREATIONS = []  # [{"name": str|None, "phone": str|None}]
+_PENDING_ORDERS = []              # [{"customer_id": str|None, "items": list}]
+
 # -----------------------------------------------------------------------------
 # OAuth2 Token 获取／缓存
 # -----------------------------------------------------------------------------
@@ -345,12 +349,34 @@ def create_customer():
     data = request.json or {}
     name = data.get("name")
     phone = data.get("phone")
-    # Gracefully handle placeholder or missing phone values
-    if phone in (None, "", "caller_id", "null", "NULL"):
-        phone = "0000000000"  # default placeholder when real phone not available
-    if not name:
-        return jsonify({"error": "missing_name"}), 400
+    app.logger.debug("/create_customer payload: %s", data)
+
+    # 若信息不完整，先放队列，返回 accepted 让对话继续
+    if not name or not phone or phone in ("caller_id", "", None, "null", "NULL"):
+        _PENDING_CUSTOMER_CREATIONS.append({"name": name, "phone": phone})
+        return jsonify({"customer_id": None, "status": "accepted"}), 200
+
+    # 正常流程：先检查本地缓存或远程是否已存在
     try:
+        # 查缓存
+        if phone in _CUSTOMER_CACHE:
+            return jsonify({"customer_id": _CUSTOMER_CACHE[phone]["id"], "status": "cached"})
+
+        # 远程查重
+        resp_chk = requests.get(
+            "https://api.loyverse.com/v1.0/customers",
+            headers=loyverse_headers(),
+            params={"phone_number": phone},
+            timeout=5
+        )
+        resp_chk.raise_for_status()
+        customers = resp_chk.json().get("customers", [])
+        if customers:
+            cid = customers[0]["id"]
+            _CUSTOMER_CACHE[phone] = {"id": cid, "name": customers[0]["name"]}
+            return jsonify({"customer_id": cid, "status": "existing"})
+
+        # 创建新客户
         resp = requests.post(
             "https://api.loyverse.com/v1.0/customers",
             headers=loyverse_headers(),
@@ -359,38 +385,43 @@ def create_customer():
         )
         resp.raise_for_status()
         body = resp.json()
-        return jsonify({"customer_id": body.get("id")})
+        cid = body.get("id")
+        _CUSTOMER_CACHE[phone] = {"id": cid, "name": name}
+        return jsonify({"customer_id": cid, "status": "created"})
     except Exception as e:
-        app.logger.error("create_customer 出错：%s", e)
-        return jsonify({"error": "failed_to_create_customer", "details": str(e)}), 500
+        app.logger.error("create_customer error: %s", e)
+        # 出错也不要阻断对话，放入挂起队列
+        _PENDING_CUSTOMER_CREATIONS.append({"name": name, "phone": phone})
+        return jsonify({"customer_id": None, "status": "queued", "details": str(e)}), 200
 
 @app.route("/place_order", methods=["POST"])
 def place_order():
     data = request.json or {}
     customer_id = data.get("customer_id")
     items = data.get("items", [])
-    if not isinstance(items, list) or not items:
-        return jsonify({"error": "missing_items"}), 400
+    app.logger.debug("/place_order payload: %s", data)
 
-    # 构造 line_items
+    if not isinstance(items, list) or not items:
+        _PENDING_ORDERS.append({"customer_id": customer_id, "items": items})
+        return jsonify({"status": "queued", "reason": "missing_items"}), 200
+
+    # 验证并转换 line_items
     line_items = []
     for it in items:
         sku = it.get("sku")
         qty = it.get("qty", 1)
         if not sku or qty <= 0:
             continue
-        line_items.append({
-            "item_variation_id": sku,
-            "quantity": qty
-        })
+        # 若能在缓存里找到匹配 SKU，则为有效项目
+        if any(m.get("sku") == sku for m in _MENU_CACHE.values()):
+            line_items.append({"item_variation_id": sku, "quantity": qty})
+    
     if not line_items:
-        return jsonify({"error": "no_valid_items"}), 400
+        # 全部是 alias 或未知 SKU，放队列等待人工/后台映射
+        _PENDING_ORDERS.append({"customer_id": customer_id, "items": items})
+        return jsonify({"status": "queued_for_mapping"}), 200
 
-    payload = {
-        "store_id": STORE_ID,
-        "line_items": line_items
-    }
-    # Only include customer_id if provided (Loyverse API allows anonymous receipts)
+    payload = {"store_id": STORE_ID, "line_items": line_items}
     if customer_id not in (None, "", "null", "NULL", "caller_id"):
         payload["customer_id"] = customer_id
 
@@ -402,10 +433,11 @@ def place_order():
             timeout=5
         )
         resp.raise_for_status()
-        return jsonify(resp.json())
+        return jsonify({"status": "success", **resp.json()})
     except Exception as e:
-        app.logger.error("place_order 出错：%s", e)
-        return jsonify({"error": "failed_to_place_order", "details": str(e)}), 500
+        app.logger.error("place_order error: %s", e)
+        _PENDING_ORDERS.append({"customer_id": customer_id, "items": items})
+        return jsonify({"status": "queued", "details": str(e)}), 200
 
 # -----------------------------------------------------------------------------
 # 启动
