@@ -4,6 +4,7 @@ import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
+from datetime import datetime
 
 load_dotenv()
 
@@ -29,6 +30,7 @@ _CUSTOMER_CACHE = {}
 # 挂起队列（简单内存，实现 demo 功能）
 _PENDING_CUSTOMER_CREATIONS = []  # [{"name": str|None, "phone": str|None}]
 _PENDING_ORDERS = []              # [{"customer_id": str|None, "items": list}]
+_SAVED_ORDERS = []               # local receipts stub
 
 # -----------------------------------------------------------------------------
 # OAuth2 Token 获取／缓存
@@ -340,48 +342,37 @@ def create_customer():
 
 @app.route("/place_order", methods=["POST"])
 def place_order():
+    global _SAVED_ORDERS
     data = request.json or {}
     customer_id = data.get("customer_id")
     items = data.get("items", [])
     app.logger.debug("/place_order payload: %s", data)
 
-    if not isinstance(items, list) or not items:
-        _PENDING_ORDERS.append({"customer_id": customer_id, "items": items})
-        return jsonify({"status": "queued", "reason": "missing_items"}), 200
+    order_stub = {
+        "receipt_id": len(_SAVED_ORDERS) + 1,
+        "customer_id": customer_id,
+        "items": items,
+        "timestamp": datetime.utcnow().isoformat() + "Z"
+    }
 
-    # 验证并转换 line_items
-    line_items = []
-    for it in items:
-        sku = it.get("sku")
-        qty = it.get("qty", 1)
-        if not sku or qty <= 0:
-            continue
-        # 若能在缓存里找到匹配 SKU，则为有效项目
-        if any(m.get("sku") == sku for m in _MENU_CACHE.values()):
-            line_items.append({"item_variation_id": sku, "quantity": qty})
-    
-    if not line_items:
-        # 全部是 alias 或未知 SKU，放队列等待人工/后台映射
-        _PENDING_ORDERS.append({"customer_id": customer_id, "items": items})
-        return jsonify({"status": "queued_for_mapping"}), 200
+    # 简单估算准备时间：主菜数量 <3 ->10min else 15min
+    prep_time = 10
+    if isinstance(items, list):
+        main_cnt = len([it for it in items if it.get("qty",1)>0])
+        if main_cnt >=3:
+            prep_time = 15
+    order_stub["preparation_time_minutes"] = prep_time
 
-    payload = {"store_id": STORE_ID, "line_items": line_items}
-    if customer_id not in (None, "", "null", "NULL", "caller_id"):
-        payload["customer_id"] = customer_id
+    _SAVED_ORDERS.append(order_stub)
 
-    try:
-        resp = requests.post(
-            "https://api.loyverse.com/v1.0/receipts",
-            headers=loyverse_headers(),
-            json=payload,
-            timeout=5
-        )
-        resp.raise_for_status()
-        return jsonify({"status": "success", **resp.json()})
-    except Exception as e:
-        app.logger.error("place_order error: %s", e)
-        _PENDING_ORDERS.append({"customer_id": customer_id, "items": items})
-        return jsonify({"status": "queued", "details": str(e)}), 200
+    # 将也放入待处理队列供后端真正推送 Loyverse
+    _PENDING_ORDERS.append({"customer_id": customer_id, "items": items})
+
+    return jsonify({
+        "status": "saved",
+        "receipt_id": order_stub["receipt_id"],
+        "preparation_time": str(prep_time)
+    }), 200
 
 # -----------------------------------------------------------------------------
 # 启动
