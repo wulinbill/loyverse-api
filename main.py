@@ -113,22 +113,30 @@ def webhook():
             
         # Handle tool calls
         if role == "tool_calls":
+            results = []
             for tool_call in tool_calls:
-                function_name = tool_call.get("function", {}).get("name")
-                arguments = json.loads(tool_call.get("function", {}).get("arguments", "{}"))
-                
-                if function_name == "create_customer":
-                    try:
+                try:
+                    function_name = tool_call.get("function", {}).get("name")
+                    arguments = json.loads(tool_call.get("function", {}).get("arguments", "{}"))
+                    tool_call_id = tool_call.get("id")
+                    
+                    if not function_name or not tool_call_id:
+                        continue
+                    
+                    result = None
+                    if function_name == "create_customer":
                         # Extract phone from caller_id or use provided phone
                         phone = arguments.get("phone", "")
                         if phone == "caller_id":
                             phone = event.get("caller_id", "")
                             if not phone:
-                                return jsonify({"error": "missing_caller_id"}), 400
+                                result = {"error": "missing_caller_id"}
+                                continue
                         
                         name = arguments.get("name")
                         if not name:
-                            return jsonify({"error": "missing_name"}), 400
+                            result = {"error": "missing_name"}
+                            continue
                         
                         # Check if customer already exists
                         existing_customer = requests.get(
@@ -147,29 +155,25 @@ def webhook():
                                 "name": customer["name"]
                             }
                             app.logger.info("Found existing customer: %s", customer["id"])
-                            return jsonify(_CUSTOMER_CACHE[phone]), 200
-                        
-                        # Create new customer
-                        resp = requests.post(
-                            "https://api.loyverse.com/v1.0/customers",
-                            headers=loyverse_headers(),
-                            json={"name": name, "phone_number": phone},
-                            timeout=5
-                        )
-                        resp.raise_for_status()
-                        customer_data = resp.json()
-                        _CUSTOMER_CACHE[phone] = {
-                            "id": customer_data["id"],
-                            "name": name
-                        }
-                        app.logger.info("Created new customer: %s", customer_data["id"])
-                        return jsonify(_CUSTOMER_CACHE[phone]), 200
-                    except Exception as e:
-                        app.logger.error("Failed to create/get customer: %s", e)
-                        return jsonify({"error": "customer_operation_failed", "details": str(e)}), 500
-                    
-                elif function_name == "get_menu":
-                    try:
+                            result = _CUSTOMER_CACHE[phone]
+                        else:
+                            # Create new customer
+                            resp = requests.post(
+                                "https://api.loyverse.com/v1.0/customers",
+                                headers=loyverse_headers(),
+                                json={"name": name, "phone_number": phone},
+                                timeout=5
+                            )
+                            resp.raise_for_status()
+                            customer_data = resp.json()
+                            _CUSTOMER_CACHE[phone] = {
+                                "id": customer_data["id"],
+                                "name": name
+                            }
+                            app.logger.info("Created new customer: %s", customer_data["id"])
+                            result = _CUSTOMER_CACHE[phone]
+                            
+                    elif function_name == "get_menu":
                         if not _MENU_CACHE:
                             # Refresh menu if cache is empty
                             menu_response = requests.get(
@@ -195,18 +199,15 @@ def webhook():
                                     }
                         
                         app.logger.info("Returning menu with %d items", len(_MENU_CACHE))
-                        return jsonify({"items": list(_MENU_CACHE.values())}), 200
-                    except Exception as e:
-                        app.logger.error("Failed to get menu: %s", e)
-                        return jsonify({"error": "menu_fetch_failed", "details": str(e)}), 500
-                    
-                elif function_name == "place_order":
-                    try:
+                        result = {"items": list(_MENU_CACHE.values())}
+                        
+                    elif function_name == "place_order":
                         customer_id = arguments.get("customer_id")
                         items = arguments.get("items", [])
                         
                         if not items:
-                            return jsonify({"error": "no_items_provided"}), 400
+                            result = {"error": "no_items_provided"}
+                            continue
                             
                         # Validate items against menu
                         valid_items = []
@@ -225,7 +226,8 @@ def webhook():
                                 })
                         
                         if not valid_items:
-                            return jsonify({"error": "no_valid_items"}), 400
+                            result = {"error": "no_valid_items"}
+                            continue
                             
                         resp = requests.post(
                             "https://api.loyverse.com/v1.0/receipts",
@@ -248,13 +250,29 @@ def webhook():
                         prep_time = "15" if len(main_dishes) >= 3 else "10"
                         
                         app.logger.info("Order placed successfully: %s", order_data.get("id"))
-                        return jsonify({
+                        result = {
                             "order": order_data,
                             "preparation_time": prep_time
-                        }), 200
-                    except Exception as e:
-                        app.logger.error("Failed to place order: %s", e)
-                        return jsonify({"error": "order_placement_failed", "details": str(e)}), 500
+                        }
+                    
+                    if result is not None:
+                        results.append({
+                            "name": function_name,
+                            "role": "tool_call_result",
+                            "toolCallId": tool_call_id,
+                            "result": result
+                        })
+                        
+                except Exception as e:
+                    app.logger.error("Error processing tool call %s: %s", function_name, e)
+                    results.append({
+                        "name": function_name,
+                        "role": "tool_call_result",
+                        "toolCallId": tool_call.get("id"),
+                        "result": {"error": str(e)}
+                    })
+            
+            return jsonify(results), 200
         
         # For all other events, just acknowledge receipt
         return jsonify({"status": "received"}), 200
