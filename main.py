@@ -70,9 +70,75 @@ def webhook():
     # Log the incoming event for debugging
     app.logger.info("Received webhook event: %s", event)
     
-    # TODO: Implement event handling logic here
-    # For now, just acknowledge receipt with 200 OK
-    return jsonify({"status": "received"}), 200
+    # Extract event details
+    role = event.get("role")
+    message = event.get("message", "")
+    tool_calls = event.get("toolCalls", [])
+    
+    try:
+        # Handle system initialization
+        if role == "system":
+            # Initialize menu and customer lookup
+            menu_response = requests.get(
+                "https://api.loyverse.com/v1.0/items",
+                headers=loyverse_headers(),
+                params={"limit": 250},
+                timeout=5
+            )
+            menu_response.raise_for_status()
+            return jsonify({"status": "initialized"}), 200
+            
+        # Handle tool calls
+        if role == "tool_calls":
+            for tool_call in tool_calls:
+                function_name = tool_call.get("function", {}).get("name")
+                arguments = json.loads(tool_call.get("function", {}).get("arguments", "{}"))
+                
+                if function_name == "create_customer":
+                    # Extract phone from caller_id or use provided phone
+                    phone = arguments.get("phone", "")
+                    if phone == "caller_id":
+                        phone = event.get("caller_id", "")
+                    
+                    resp = requests.post(
+                        "https://api.loyverse.com/v1.0/customers",
+                        headers=loyverse_headers(),
+                        json={"name": arguments.get("name"), "phone_number": phone},
+                        timeout=5
+                    )
+                    resp.raise_for_status()
+                    return jsonify(resp.json()), 200
+                    
+                elif function_name == "get_menu":
+                    resp = requests.get(
+                        "https://api.loyverse.com/v1.0/items",
+                        headers=loyverse_headers(),
+                        params={"limit": 250},
+                        timeout=5
+                    )
+                    resp.raise_for_status()
+                    return jsonify(resp.json()), 200
+                    
+                elif function_name == "place_order":
+                    resp = requests.post(
+                        "https://api.loyverse.com/v1.0/receipts",
+                        headers=loyverse_headers(),
+                        json={
+                            "store_id": STORE_ID,
+                            "customer_id": arguments.get("customer_id"),
+                            "line_items": arguments.get("items", [])
+                        },
+                        timeout=5
+                    )
+                    resp.raise_for_status()
+                    return jsonify(resp.json()), 200
+        
+        # For all other events, just acknowledge receipt
+        return jsonify({"status": "received"}), 200
+        
+    except Exception as e:
+        app.logger.error("Error processing webhook event: %s", e)
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/get_menu", methods=["GET", "POST"])
 def get_menu():
