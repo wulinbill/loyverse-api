@@ -59,9 +59,20 @@ def loyverse_headers():
 # -----------------------------------------------------------------------------
 # 路由
 # -----------------------------------------------------------------------------
-@app.route("/")
-def index():
-    return "Loyverse API bridge running."
+@app.route("/", methods=["GET", "POST"])
+def webhook():
+    if request.method == "GET":
+        return "Loyverse API bridge running."
+    
+    # Handle POST webhook events
+    event = request.json or {}
+    
+    # Log the incoming event for debugging
+    app.logger.info("Received webhook event: %s", event)
+    
+    # TODO: Implement event handling logic here
+    # For now, just acknowledge receipt with 200 OK
+    return jsonify({"status": "received"}), 200
 
 @app.route("/get_menu", methods=["GET", "POST"])
 def get_menu():
