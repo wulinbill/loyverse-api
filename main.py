@@ -345,8 +345,11 @@ def create_customer():
     data = request.json or {}
     name = data.get("name")
     phone = data.get("phone")
-    if not name or not phone:
-        return jsonify({"error": "missing_parameters"}), 400
+    # Gracefully handle placeholder or missing phone values
+    if phone in (None, "", "caller_id", "null", "NULL"):
+        phone = "0000000000"  # default placeholder when real phone not available
+    if not name:
+        return jsonify({"error": "missing_name"}), 400
     try:
         resp = requests.post(
             "https://api.loyverse.com/v1.0/customers",
@@ -356,7 +359,7 @@ def create_customer():
         )
         resp.raise_for_status()
         body = resp.json()
-        return jsonify({"customer_id": body["id"]})
+        return jsonify({"customer_id": body.get("id")})
     except Exception as e:
         app.logger.error("create_customer 出错：%s", e)
         return jsonify({"error": "failed_to_create_customer", "details": str(e)}), 500
@@ -366,8 +369,8 @@ def place_order():
     data = request.json or {}
     customer_id = data.get("customer_id")
     items = data.get("items", [])
-    if customer_id is None or not isinstance(items, list) or not items:
-        return jsonify({"error": "missing_parameters"}), 400
+    if not isinstance(items, list) or not items:
+        return jsonify({"error": "missing_items"}), 400
 
     # 构造 line_items
     line_items = []
@@ -385,9 +388,12 @@ def place_order():
 
     payload = {
         "store_id": STORE_ID,
-        "customer_id": customer_id,
         "line_items": line_items
     }
+    # Only include customer_id if provided (Loyverse API allows anonymous receipts)
+    if customer_id not in (None, "", "null", "NULL", "caller_id"):
+        payload["customer_id"] = customer_id
+
     try:
         resp = requests.post(
             "https://api.loyverse.com/v1.0/receipts",
