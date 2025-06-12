@@ -129,54 +129,35 @@ def webhook():
                     
                     result = None
                     if function_name == "create_customer":
-                        # Extract phone from caller_id or use provided phone
+                        # Extract phone and name
                         phone = arguments.get("phone", "")
                         if phone == "caller_id":
                             phone = event.get("caller_id", "")
-                            if not phone:
-                                result = {"error": "missing_caller_id"}
-                                continue
-                        
                         name = arguments.get("name")
-                        if not name:
-                            result = {"error": "missing_name"}
-                            continue
-                        
-                        # Check if customer already exists
-                        existing_customer = requests.get(
-                            "https://api.loyverse.com/v1.0/customers",
-                            headers=loyverse_headers(),
-                            params={"phone_number": phone},
-                            timeout=5
-                        )
-                        existing_customer.raise_for_status()
-                        existing_data = existing_customer.json()
-                        
-                        if existing_data.get("customers"):
-                            customer = existing_data["customers"][0]
-                            _CUSTOMER_CACHE[phone] = {
-                                "id": customer["id"],
-                                "name": customer["name"]
-                            }
-                            app.logger.info("Found existing customer: %s", customer["id"])
-                            result = _CUSTOMER_CACHE[phone]
+
+                        # Fast-path: information incomplete -> accept & queue
+                        if not name or not phone or phone in ("", None, "null", "NULL"):
+                            _PENDING_CUSTOMER_CREATIONS.append({"name": name, "phone": phone})
+                            result = {"customer_id": None, "status": "accepted"}
                         else:
-                            # Create new customer
-                            resp = requests.post(
-                                "https://api.loyverse.com/v1.0/customers",
-                                headers=loyverse_headers(),
-                                json={"name": name, "phone_number": phone},
-                                timeout=5
-                            )
-                            resp.raise_for_status()
-                            customer_data = resp.json()
-                            _CUSTOMER_CACHE[phone] = {
-                                "id": customer_data["id"],
-                                "name": name
-                            }
-                            app.logger.info("Created new customer: %s", customer_data["id"])
-                            result = _CUSTOMER_CACHE[phone]
-                            
+                            try:
+                                # Try cache
+                                if phone in _CUSTOMER_CACHE:
+                                    result = {"customer_id": _CUSTOMER_CACHE[phone]["id"], "status": "cached"}
+                                else:
+                                    # remote check/create via our endpoint to reuse logic
+                                    resp = requests.post(
+                                        f"http://localhost:{PORT}/create_customer",
+                                        json={"name": name, "phone": phone},
+                                        timeout=5
+                                    )
+                                    resp.raise_for_status()
+                                    result = resp.json()
+                            except Exception as e:
+                                app.logger.error("tool create_customer failed: %s", e)
+                                _PENDING_CUSTOMER_CREATIONS.append({"name": name, "phone": phone})
+                                result = {"customer_id": None, "status": "queued", "details": str(e)}
+
                     elif function_name == "get_menu":
                         if not _MENU_CACHE:
                             # Refresh menu if cache is empty
@@ -208,56 +189,19 @@ def webhook():
                     elif function_name == "place_order":
                         customer_id = arguments.get("customer_id")
                         items = arguments.get("items", [])
-                        
-                        if not items:
-                            result = {"error": "no_items_provided"}
-                            continue
-                            
-                        # Validate items against menu
-                        valid_items = []
-                        for item in items:
-                            sku = item.get("sku")
-                            qty = item.get("qty", 1)
-                            if not sku or qty <= 0:
-                                continue
-                                
-                            # Find item in menu cache
-                            menu_item = next((m for m in _MENU_CACHE.values() if m["sku"] == sku), None)
-                            if menu_item:
-                                valid_items.append({
-                                    "item_variation_id": sku,
-                                    "quantity": qty
-                                })
-                        
-                        if not valid_items:
-                            result = {"error": "no_valid_items"}
-                            continue
-                            
-                        resp = requests.post(
-                            "https://api.loyverse.com/v1.0/receipts",
-                            headers=loyverse_headers(),
-                            json={
-                                "store_id": STORE_ID,
-                                "customer_id": customer_id,
-                                "line_items": valid_items
-                            },
-                            timeout=5
-                        )
-                        resp.raise_for_status()
-                        order_data = resp.json()
-                        
-                        # Calculate preparation time based on main dishes
-                        main_dishes = [item for item in valid_items if not any(
-                            cat in _MENU_CACHE.get(item["item_variation_id"], {}).get("category", "").lower()
-                            for cat in ["acompanantes", "aparte", "extra", "salsa", "no", "poco"]
-                        )]
-                        prep_time = "15" if len(main_dishes) >= 3 else "10"
-                        
-                        app.logger.info("Order placed successfully: %s", order_data.get("id"))
-                        result = {
-                            "order": order_data,
-                            "preparation_time": prep_time
-                        }
+
+                        try:
+                            resp = requests.post(
+                                f"http://localhost:{PORT}/place_order",
+                                json={"customer_id": customer_id, "items": items},
+                                timeout=5
+                            )
+                            resp.raise_for_status()
+                            result = resp.json()
+                        except Exception as e:
+                            app.logger.error("tool place_order failed: %s", e)
+                            _PENDING_ORDERS.append({"customer_id": customer_id, "items": items})
+                            result = {"status": "queued", "details": str(e)}
                     
                     if result is not None:
                         results.append({
