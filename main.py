@@ -66,7 +66,6 @@ def extract_phone(webhook_body: dict) -> str:
 
 
 def ensure_customer_by_phone(phone: str):
-    # Try to find existing customer
     resp = requests.get(
         f"{API_BASE}/customers",
         headers=loyverse_headers(),
@@ -76,7 +75,6 @@ def ensure_customer_by_phone(phone: str):
     custs = resp.json().get("customers", [])
     if custs:
         return custs[0]["id"]
-    # Create new customer
     payload = {"name": phone, "phone_number": phone}
     resp2 = requests.post(
         f"{API_BASE}/customers",
@@ -164,7 +162,6 @@ def place_order():
     orders = body.get("items", [])
     if not orders:
         return jsonify({"error": "items array is required"}), 400
-    # Build price map
     menu_items = get_menu().get_json().get("menu", [])
     price_map = {it["variant_id"]: it["price_base"] for it in menu_items}
     line_items = []
@@ -182,19 +179,14 @@ def place_order():
             "cost": 0
         })
         total += price * qty
-    # Determine customer_id
     cust_id = body.get("customer_id")
     if not cust_id:
         phone = extract_phone(body)
         if phone:
             cust_id = ensure_customer_by_phone(phone)
-    # Build payments
     payments = [{
         "payment_type_id": CASH_PAYMENT_TYPE_ID,
-        "money_amount":    total,
-        "type":            "CASH",
-        "name":            "Cash",
-        "paid_at":         datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        "money_amount":    total
     }]
     payload = {
         "store_id":      STORE_ID,
