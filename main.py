@@ -4,8 +4,13 @@ import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
+import logging
+import traceback
 
 load_dotenv()
+
+# 配置简单日志，便于 Render / Vercel 诊断
+logging.basicConfig(level=logging.INFO)
 
 app = Flask(__name__)
 CORS(app)
@@ -141,7 +146,7 @@ def place_order():
         # 使用 dining_option 指示外带，官方已弃用 order_type
         "dining_option": "TAKEAWAY",
         "line_items": [
-            {"variant_id": it["sku"], "quantity": it["qty"]}
+            {"variant_id": it["variant_id"], "quantity": it["quantity"]}
             for it in items
         ]
     }
@@ -158,6 +163,18 @@ def place_order():
         "receipt_number": r.get("receipt_number"),
         "total_money":    r.get("total_money")
     })
+
+# ---------------------- 全局异常处理 ---------------------- #
+
+@app.errorhandler(Exception)
+def handle_exception(err):
+    """捕获未处理异常并返回 JSON，同时打印堆栈方便排查"""
+    logging.error("Unhandled exception: %s", err)
+    traceback.print_exc()
+    return jsonify({
+        "error": str(err),
+        "type": err.__class__.__name__
+    }), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
