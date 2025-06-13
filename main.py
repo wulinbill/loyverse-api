@@ -3,7 +3,7 @@ import time
 import logging
 import traceback
 from datetime import datetime
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
 
@@ -11,7 +11,6 @@ import requests
 CLIENT_ID            = os.getenv("LOYVERSE_CLIENT_ID")
 CLIENT_SECRET        = os.getenv("LOYVERSE_CLIENT_SECRET")
 REFRESH_TOKEN        = os.getenv("LOYVERSE_REFRESH_TOKEN")
-REDIRECT_URI         = os.getenv("LOYVERSE_REDIRECT_URI")  # Optional for manual callback
 STORE_ID             = os.getenv("LOYVERSE_STORE_ID")
 CASH_PAYMENT_TYPE_ID = os.getenv("LOYVERSE_CASH_PAYMENT_TYPE_ID")
 
@@ -24,13 +23,12 @@ CORS(app)
 logging.basicConfig(level=logging.INFO)
 
 # In-memory token cache
-TOKEN_CACHE = {"access_token": None, "expires_at": 0}
+token_cache = {"access_token": None, "expires_at": 0}
 
 
 def _refresh_access_token():
-    """Use static REFRESH_TOKEN to fetch a new access token"""
     if not all([CLIENT_ID, CLIENT_SECRET, REFRESH_TOKEN]):
-        raise RuntimeError("Missing CLIENT_ID, CLIENT_SECRET or REFRESH_TOKEN")
+        raise RuntimeError("Missing CLIENT_ID/CLIENT_SECRET/REFRESH_TOKEN")
     resp = requests.post(
         OAUTH_TOKEN_URL,
         headers={"Content-Type": "application/x-www-form-urlencoded"},
@@ -39,20 +37,18 @@ def _refresh_access_token():
             "refresh_token": REFRESH_TOKEN,
             "client_id":     CLIENT_ID,
             "client_secret": CLIENT_SECRET,
-        },
-        timeout=15,
+        }, timeout=15
     )
     resp.raise_for_status()
     data = resp.json()
-    TOKEN_CACHE["access_token"] = data["access_token"]
-    TOKEN_CACHE["expires_at"]   = time.time() + data.get("expires_in", 0) - 60
+    token_cache["access_token"] = data["access_token"]
+    token_cache["expires_at"]   = time.time() + data.get("expires_in", 0) - 60
 
 
 def get_access_token():
-    """Return valid access token, refreshing if expired"""
-    if (TOKEN_CACHE["access_token"] is None or time.time() >= TOKEN_CACHE["expires_at"]):
+    if token_cache["access_token"] is None or time.time() >= token_cache["expires_at"]:
         _refresh_access_token()
-    return TOKEN_CACHE["access_token"]
+    return token_cache["access_token"]
 
 
 def loyverse_headers():
@@ -61,17 +57,34 @@ def loyverse_headers():
 
 
 def extract_phone(webhook_body: dict) -> str:
-    """Extract caller phone number from VAPI webhook payload"""
-    phone = (
-        webhook_body.get("call", {})
-                    .get("customer", {})
-                    .get("number")
-    )
+    phone = webhook_body.get("call", {}).get("customer", {}).get("number")
     if not phone:
         phone = webhook_body.get("customer", {}).get("number")
     if not phone:
         phone = webhook_body.get("phone")
     return phone or ""
+
+
+def ensure_customer_by_phone(phone: str):
+    # Try to find existing customer
+    resp = requests.get(
+        f"{API_BASE}/customers",
+        headers=loyverse_headers(),
+        params={"phone_number": phone, "limit": 1}, timeout=15
+    )
+    resp.raise_for_status()
+    custs = resp.json().get("customers", [])
+    if custs:
+        return custs[0]["id"]
+    # Create new customer
+    payload = {"name": phone, "phone_number": phone}
+    resp2 = requests.post(
+        f"{API_BASE}/customers",
+        headers=loyverse_headers(),
+        json=payload, timeout=15
+    )
+    resp2.raise_for_status()
+    return resp2.json().get("id")
 
 
 @app.route("/", methods=["GET"])
@@ -92,8 +105,7 @@ def get_menu():
         resp = requests.get(
             f"{API_BASE}/items",
             headers=loyverse_headers(),
-            params=params,
-            timeout=15
+            params=params, timeout=15
         )
         resp.raise_for_status()
         data = resp.json()
@@ -121,18 +133,8 @@ def get_customer():
     phone = extract_phone(body)
     if not phone:
         return jsonify({"error": "phone is required"}), 400
-    resp = requests.get(
-        f"{API_BASE}/customers",
-        headers=loyverse_headers(),
-        params={"limit": 1, "phone_number": phone},
-        timeout=15
-    )
-    resp.raise_for_status()
-    custs = resp.json().get("customers", [])
-    if custs:
-        c = custs[0]
-        return jsonify({"customer_id": c.get("id"), "name": c.get("name")})
-    return jsonify({"customer_id": None, "name": None})
+    cust_id = ensure_customer_by_phone(phone)
+    return jsonify({"customer_id": cust_id})
 
 
 @app.route("/create_customer", methods=["POST", "OPTIONS"])
@@ -141,15 +143,14 @@ def create_customer():
         return "", 200
     body = request.get_json(silent=True) or {}
     name = body.get("name")
-    phone = body.get("phone") or extract_phone(body)
+    phone = body.get("phone")
     if not name or not phone:
         return jsonify({"error": "name & phone are required"}), 400
     payload = {"name": name, "phone_number": phone}
     resp = requests.post(
         f"{API_BASE}/customers",
         headers=loyverse_headers(),
-        json=payload,
-        timeout=15
+        json=payload, timeout=15
     )
     resp.raise_for_status()
     return jsonify({"customer_id": resp.json().get("id")})
@@ -163,9 +164,9 @@ def place_order():
     orders = body.get("items", [])
     if not orders:
         return jsonify({"error": "items array is required"}), 400
-    # Fetch menu for pricing
-    menu = get_menu().get_json().get("menu", [])
-    price_map = {item["variant_id"]: item["price_base"] for item in menu}
+    # Build price map
+    menu_items = get_menu().get_json().get("menu", [])
+    price_map = {it["variant_id"]: it["price_base"] for it in menu_items}
     line_items = []
     total = 0
     for o in orders:
@@ -181,6 +182,13 @@ def place_order():
             "cost": 0
         })
         total += price * qty
+    # Determine customer_id
+    cust_id = body.get("customer_id")
+    if not cust_id:
+        phone = extract_phone(body)
+        if phone:
+            cust_id = ensure_customer_by_phone(phone)
+    # Build payments
     payments = [{
         "payment_type_id": CASH_PAYMENT_TYPE_ID,
         "money_amount":    total,
@@ -188,25 +196,24 @@ def place_order():
         "name":            "Cash",
         "paid_at":         datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     }]
-    customer_id = body.get("customer_id") or extract_phone(body)
     payload = {
-        "customer_id":   customer_id,
         "store_id":      STORE_ID,
         "dining_option": "TAKEAWAY",
         "line_items":    line_items,
         "payments":      payments,
     }
+    if cust_id:
+        payload["customer_id"] = cust_id
     resp = requests.post(
         f"{API_BASE}/receipts",
         headers=loyverse_headers(),
-        json=payload,
-        timeout=15
+        json=payload, timeout=15
     )
     resp.raise_for_status()
     r = resp.json()
     return jsonify({
         "receipt_number": r.get("receipt_number"),
-        "total_money":    r.get("total_money"),
+        "total_money":    r.get("total_money")
     })
 
 
@@ -218,7 +225,7 @@ def handle_exception(err):
     if resp is not None:
         try:
             payload["detail"] = resp.json()
-        except Exception:
+        except:
             payload["detail_text"] = resp.text
         return jsonify(payload), resp.status_code
     return jsonify(payload), 500
