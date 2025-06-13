@@ -171,10 +171,28 @@ def handle_exception(err):
     """捕获未处理异常并返回 JSON，同时打印堆栈方便排查"""
     logging.error("Unhandled exception: %s", err)
     traceback.print_exc()
-    return jsonify({
+
+    error_payload = {
         "error": str(err),
         "type": err.__class__.__name__
-    }), 500
+    }
+
+    # 如果是 requests.HTTPError，添加更多上下文
+    if isinstance(err, requests.HTTPError):
+        resp = err.response
+        if resp is not None:
+            # 若上游已返回标准 errors 列表，则直接透传
+            try:
+                upstream = resp.json()
+                if "errors" in upstream:
+                    return jsonify(upstream), resp.status_code
+                # 否则继续收集调试信息
+                error_payload["response"] = upstream
+            except Exception:
+                error_payload["response_text"] = resp.text[:500]
+            error_payload["status_code"] = resp.status_code
+
+    return jsonify(error_payload), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
