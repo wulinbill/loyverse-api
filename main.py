@@ -22,8 +22,9 @@ CLIENT_SECRET          = os.getenv("LOYVERSE_CLIENT_SECRET")
 REFRESH_TOKEN          = os.getenv("LOYVERSE_REFRESH_TOKEN")      # OAuth 流程获取
 PERSONAL_TOKEN         = os.getenv("LOYVERSE_PERSONAL_TOKEN")     # 仅读权限，可选
 STORE_ID               = os.getenv("LOYVERSE_STORE_ID")
-SELF_URL               = os.getenv("https://loyverse-api.onrender.com")                     # 例如 https://loyverse-api.onrender.com
+SELF_URL               = os.getenv("SELF_URL")                     # 例如 https://loyverse-api.onrender.com
 API_BASE               = "https://api.loyverse.com/v1.0"
+OAUTH_TOKEN_URL        = "https://api.loyverse.com/oauth/token"
 
 # ------------------------------------------------------------
 # Flask app
@@ -108,8 +109,8 @@ def oauth_callback():
     if not code:
         return "Missing code parameter", 400
 
-    token_resp = requests.post(
-        f"{API_BASE}/oauth/token",
+    resp = requests.post(
+        OAUTH_TOKEN_URL,
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         data={
             "grant_type": "authorization_code",
@@ -120,8 +121,8 @@ def oauth_callback():
         },
         timeout=15,
     )
-    token_resp.raise_for_status()
-    data = token_resp.json()
+    resp.raise_for_status()
+    data = resp.json()
     logging.info("<<< NEW REFRESH_TOKEN >>> %s", data.get("refresh_token"))
     return jsonify({"refresh_token": data.get("refresh_token"), "note": "Save this in LOYVERSE_REFRESH_TOKEN env var"})
 
