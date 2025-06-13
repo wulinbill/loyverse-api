@@ -130,18 +130,22 @@ def create_customer():
 
 @app.route("/place_order", methods=["POST"])
 def place_order():
-    """下单到 Loyverse POS，并返回 total_with_tax + receipt_id"""
+    """在 Loyverse POS 创建 TAKEAWAY 单，并返回 receipt_number 与 total_money"""
     data = request.json
     items = data["items"]
+
+    # 组装符合官方文档的请求体
     body = {
         "customer_id": data.get("customer_id"),
         "store_id":    STORE_ID,
-        "order_type":  "TAKEAWAY",
+        # 使用 dining_option 指示外带，官方已弃用 order_type
+        "dining_option": "TAKEAWAY",
         "line_items": [
             {"variant_id": it["sku"], "quantity": it["qty"]}
             for it in items
         ]
     }
+
     resp = requests.post(
         f"{API_BASE}/receipts",
         headers=loyverse_headers(),
@@ -149,9 +153,10 @@ def place_order():
     )
     resp.raise_for_status()
     r = resp.json()
+
     return jsonify({
-        "receipt_id":    r.get("receipt_id"),
-        "total_with_tax": r.get("total_with_tax")
+        "receipt_number": r.get("receipt_number"),
+        "total_money":    r.get("total_money")
     })
 
 if __name__ == "__main__":
