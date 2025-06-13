@@ -7,10 +7,10 @@ import requests
 app = Flask(__name__)
 
 # 从环境变量读取凭据和回调地址
-CLIENT_ID     = os.getenv("LOYVERSE_CLIENT_ID", "GjfBWi8E7o48tuJwYgkQ")
-CLIENT_SECRET = os.getenv("LOYVERSE_CLIENT_SECRET", "B7z26sykAC2_zn5qsuiWW6FErXxd0zn4M0-Hgr6e9xCw0rJzbo7iCQ==")
-REDIRECT_URI  = os.getenv("LOYVERSE_REDIRECT_URI", "https://loyverse-api.onrender.com/callback")
-SCOPE         = os.getenv("LOYVERSE_SCOPE", "CUSTOMERS_READ CUSTOMERS_WRITE ITEMS_READ MERCHANT_READ PAYMENT_TYPES_READ POS_DEVICES_READ POS_DEVICES_WRITE RECEIPTS_READ RECEIPTS_WRITE STORES_READ TAXES_READ TAXES_WRITE")
+CLIENT_ID     = os.getenv("LOYVERSE_CLIENT_ID", "<你的_client_id>")
+CLIENT_SECRET = os.getenv("LOYVERSE_CLIENT_SECRET", "<你的_client_secret>")
+REDIRECT_URI  = os.getenv("LOYVERSE_REDIRECT_URI", "https://<your-domain>.onrender.com/callback")
+SCOPE         = os.getenv("LOYVERSE_SCOPE", "ITEMS_READ RECEIPTS_WRITE")
 
 AUTH_URL  = "https://api.loyverse.com/oauth/authorize"
 TOKEN_URL = "https://api.loyverse.com/oauth/token"
