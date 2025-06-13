@@ -6,12 +6,13 @@ import requests
 from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
 
-# === 配置项（Environment Variables） ===
-CLIENT_ID     = os.getenv("LOYVERSE_CLIENT_ID")
-CLIENT_SECRET = os.getenv("LOYVERSE_CLIENT_SECRET")
-REFRESH_TOKEN = os.getenv("LOYVERSE_REFRESH_TOKEN")
-REDIRECT_URI  = os.getenv("LOYVERSE_REDIRECT_URI")
-STORE_ID      = os.getenv("LOYVERSE_STORE_ID")
+# === 配置项（通过 Render Environment Variables 或 .env 设置） ===
+CLIENT_ID                   = os.getenv("LOYVERSE_CLIENT_ID")
+CLIENT_SECRET               = os.getenv("LOYVERSE_CLIENT_SECRET")
+REFRESH_TOKEN               = os.getenv("LOYVERSE_REFRESH_TOKEN")
+REDIRECT_URI                = os.getenv("LOYVERSE_REDIRECT_URI")
+STORE_ID                    = os.getenv("LOYVERSE_STORE_ID")
+CASH_PAYMENT_TYPE_ID        = os.getenv("LOYVERSE_CASH_PAYMENT_TYPE_ID")
 
 # === 常量 ===
 OAUTH_TOKEN_URL = "https://api.loyverse.com/oauth/token"
@@ -19,12 +20,15 @@ API_BASE        = "https://api.loyverse.com/v1.0"
 
 # === Flask 应用 & CORS ===
 app = Flask(__name__)
-CORS(app)  # ← 允许所有路由、所有源的跨域请求
+CORS(app)
 
 logging.basicConfig(level=logging.INFO)
 
 # ==== 内存缓存 Access Token ====
-TOKEN_CACHE = {"access_token": None, "expires_at": 0}
+TOKEN_CACHE = {
+    "access_token": None,
+    "expires_at":   0,
+}
 
 def _oauth_refresh():
     if not all([CLIENT_ID, CLIENT_SECRET, REFRESH_TOKEN]):
@@ -127,7 +131,12 @@ def get_menu():
         params = {"limit": 250}
         if cursor:
             params["cursor"] = cursor
-        resp = requests.get(f"{API_BASE}/items", headers=loyverse_headers(), params=params, timeout=15)
+        resp = requests.get(
+            f"{API_BASE}/items",
+            headers=loyverse_headers(),
+            params=params,
+            timeout=15
+        )
         resp.raise_for_status()
         data = resp.json()
         for it in data.get("items", []):
@@ -139,11 +148,11 @@ def get_menu():
             if not variants:
                 continue
             items.append({
-                "sku": variants[0]["variant_id"],
-                "name": it["item_name"],
-                "category": it.get("category_id"),
+                "sku":        variants[0]["variant_id"],
+                "name":       it["item_name"],
+                "category":   it.get("category_id"),
                 "price_base": variants[0]["price"],
-                "aliases": [],
+                "aliases":    [],
             })
         cursor = data.get("cursor")
         if not cursor:
@@ -157,14 +166,15 @@ def get_customer():
     resp = requests.get(
         f"{API_BASE}/customers",
         headers=loyverse_headers(),
-        params={"phone_number": phone, "limit": 50},
-        timeout=15,
+        params={"limit": 250},
+        timeout=15
     )
     resp.raise_for_status()
-    custs = resp.json().get("customers", [])
-    if custs:
-        c = custs[0]
-        return jsonify({"customer_id": c["id"], "name": c["name"]})
+    # 客户端过滤
+    customers = [c for c in resp.json().get("customers", []) if c.get("phone_number") == phone]
+    if customers:
+        c = customers[0]
+        return jsonify({"customer_id": c["id"], "name": c.get("name")})
     return jsonify({"customer_id": None, "name": None})
 
 # ---------- 创建顾客 ----------
@@ -174,7 +184,12 @@ def create_customer():
     if "name" not in data or "phone" not in data:
         return jsonify({"error": "name & phone are required"}), 400
     payload = {"name": data["name"], "phone_number": data["phone"]}
-    resp = requests.post(f"{API_BASE}/customers", headers=loyverse_headers(), json=payload, timeout=15)
+    resp = requests.post(
+        f"{API_BASE}/customers",
+        headers=loyverse_headers(),
+        json=payload,
+        timeout=15
+    )
     resp.raise_for_status()
     return jsonify({"customer_id": resp.json()["id"]})
 
@@ -185,16 +200,35 @@ def place_order():
     items = data.get("items", [])
     if not items:
         return jsonify({"error": "items array is required"}), 400
+
+    line_items = [{"variant_id": it["variant_id"], "quantity": it["quantity"]} for it in items]
+
+    # 预估总价
+    resp_est = requests.post(
+        f"{API_BASE}/receipts/preview",
+        headers=loyverse_headers(),
+        json={"store_id": STORE_ID, "line_items": line_items},
+        timeout=15
+    )
+    resp_est.raise_for_status()
+    total_money = resp_est.json().get("total_money")
+
     body = {
         "customer_id":   data.get("customer_id"),
         "store_id":      STORE_ID,
         "dining_option": "TAKEAWAY",
-        "line_items": [
-            {"variant_id": it["variant_id"], "quantity": it["quantity"]}
-            for it in items
-        ],
+        "line_items":    line_items,
+        "payments": [
+            {"payment_type_id": CASH_PAYMENT_TYPE_ID, "money_amount": total_money}
+        ]
     }
-    resp = requests.post(f"{API_BASE}/receipts", headers=loyverse_headers(), json=body, timeout=15)
+
+    resp = requests.post(
+        f"{API_BASE}/receipts",
+        headers=loyverse_headers(),
+        json=body,
+        timeout=15
+    )
     resp.raise_for_status()
     r = resp.json()
     return jsonify({"receipt_number": r.get("receipt_number"), "total_money": r.get("total_money")})
